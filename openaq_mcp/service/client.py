@@ -64,9 +64,9 @@ class OpenAQClient:
             "id": loc["id"],
             "name": loc.get("name"),
             "locality": loc.get("locality"),
-            "country": loc.get("country", {}).get("code"),
+            "country": (loc.get("country") or {}).get("code"),
             "coordinates": loc.get("coordinates"),
-            "last_reported": loc.get("datetimeLast", {}).get("utc"),
+            "last_reported": (loc.get("datetimeLast") or {}).get("utc"),
             # Pollutants this station measures, pulled from sensors but not exposing sensor IDs.
             "pollutants": [
                 s["parameter"]["name"] for s in loc.get("sensors", [])
