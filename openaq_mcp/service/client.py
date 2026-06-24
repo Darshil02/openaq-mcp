@@ -92,6 +92,126 @@ class OpenAQClient:
             for s in sensors
         }
 
+    def _resolve_sensor(self, location_id: int, parameter: str) -> dict:
+        """Find the sensor at a location that measures a given pollutant.
+
+        Returns {"sensor_id": int, "parameter": str, "unit": str}.
+
+        Raises OpenAQError with an instructive message if the pollutant isn't
+        measured here, listing what IS available so the caller can retry.
+        """
+        sensor_map = self._get_sensor_map(location_id)
+        if not sensor_map:
+            raise OpenAQError(
+                f"location {location_id} has no sensors; "
+                f"call find_locations to confirm the id"
+            )
+
+        wanted = parameter.strip().lower()
+        for sensor_id, meta in sensor_map.items():
+            if meta["parameter"].lower() == wanted:
+                return {
+                    "sensor_id": sensor_id,
+                    "parameter": meta["parameter"],
+                    "unit": meta["unit"],
+                }
+
+        # Miss: turn it into an instruction, not a dead end.
+        available = sorted(m["parameter"] for m in sensor_map.values())
+        raise OpenAQError(
+            f"'{parameter}' is not measured at location {location_id}. "
+            f"Available pollutants here: {', '.join(available)}"
+        )
+
+    # Maps the model-facing aggregation choice to the endpoint path segment.
+    # raw -> /measurements, daily -> /measurements/daily, hourly -> /measurements/hourly.
+    _AGG_PATHS = {
+        "raw": "measurements",
+        "hourly": "measurements/hourly",
+        "daily": "measurements/daily",
+    }
+
+    def get_measurements(
+        self,
+        location_id: int,
+        parameter: str,
+        date_from: str,
+        date_to: str,
+        aggregation: str = "daily",
+        limit: int = 100,
+    ) -> dict:
+        """Historical series for one pollutant at one station.
+
+        Resolves the pollutant to its sensor internally, then fetches the
+        aggregated series. Units travel with every value. Results are capped at
+        `limit`; if more exist, the response says so rather than paging forever.
+        """
+        if aggregation not in self._AGG_PATHS:
+            raise OpenAQError(
+                f"aggregation must be one of {sorted(self._AGG_PATHS)}; got '{aggregation}'"
+            )
+
+        # Hop 1: pollutant name -> sensor (raises instructively on a miss).
+        sensor = self._resolve_sensor(location_id, parameter)
+        sensor_id = sensor["sensor_id"]
+        unit = sensor["unit"]
+
+        # Hop 2: fetch the series from the sensor endpoint.
+        path = f"/sensors/{sensor_id}/{self._AGG_PATHS[aggregation]}"
+        data = self._get(path, {
+            "datetime_from": date_from,
+            "datetime_to": date_to,
+            "limit": limit,
+        })
+
+        results = data.get("results", [])
+        found = data.get("meta", {}).get("found")
+
+        series = [self._shape_measurement(m, unit) for m in results]
+
+        # Truncation as instruction, not silence (audit #7).
+        truncated = isinstance(found, int) and found > len(series)
+        note = None
+        if not series:
+            note = (
+                f"No {parameter} measurements at location {location_id} between "
+                f"{date_from} and {date_to}. The station may not have reported then, "
+                f"or the range may predate its first data."
+            )
+        elif truncated:
+            note = (
+                f"Showing first {len(series)} of {found} points. "
+                f"Narrow the date range for finer detail."
+            )
+
+        return {
+            "location_id": location_id,
+            "parameter": sensor["parameter"],
+            "unit": unit,
+            "aggregation": aggregation,
+            "series": series,
+            "note": note,
+        }
+
+    def _shape_measurement(self, m: dict, unit: str) -> dict:
+        """Trim one measurement bucket. Daily/hourly carry summary + coverage;
+        raw carries a single value. Shape both into one consistent form."""
+        period = m.get("period") or {}
+        bucket = (period.get("datetimeFrom") or {}).get("utc")
+
+        summary = m.get("summary") or {}
+        coverage = m.get("coverage") or {}
+
+        return {
+            "date": bucket,
+            "value": m.get("value"),          # present on raw; may be None on aggregated
+            "avg": summary.get("avg"),        # headline for daily/hourly
+            "min": summary.get("min"),
+            "max": summary.get("max"),
+            "unit": unit,                     # unit travels with the value
+            "coverage_pct": coverage.get("percentComplete"),
+        }
+
     def get_readings(self, location_id: int) -> dict:
         """Latest value per pollutant at a station, each joined to its unit.
 

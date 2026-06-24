@@ -27,3 +27,27 @@ The `/latest` endpoint returns the last known value regardless of age, so latest
 ## Empty means no coverage
 
 An empty readings list returns an explicit note: no current data, not necessarily clean air. Silence must never be read as safety.
+
+## Sensor metadata refetch
+
+`/locations/{id}` is fetched on every get_readings and every get_measurements (via the sensor resolver). It changes rarely, so it is the first caching target in Phase 2.
+
+## Staleness threshold is a deliberate cliff
+
+48 hours is a fixed boundary, not a tuned value. age_hours is exposed alongside the stale boolean so consumers can apply their own judgment rather than trusting the cliff.
+
+## Negative values preserved, not clamped
+
+Daily minimums occasionally go slightly negative (near-zero sensor noise). Clamping to zero would falsify the source, so values pass through as returned, consistent with the never-convert-units principle.
+
+## No float rounding in the service layer
+
+OpenAQ's own `value` field provides a clean rounded figure; avg, min, and max carry full precision. The service layer stays a faithful pipe and lets the consumer choose which to display.
+
+## Aggregation is a URL choice, not a query parameter
+
+raw, hourly, and daily map to three different endpoint paths (/measurements, /measurements/hourly, /measurements/daily), validated at the edge against a fixed set.
+
+## Errors written as instructions
+
+A pollutant miss returns the available pollutants for that station; a bad aggregation returns the valid options; an empty window states the likely cause. The aim is model self-correction within one turn, not just failure reporting.
